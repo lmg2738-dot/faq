@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.venv/
+venv/
+*.log
+install_startup.ps1
+uninstall_startup.ps1
+build.ps1
+start_chatbot.bat

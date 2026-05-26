@@ -2,6 +2,7 @@ import os
 import re
 import math
 import json
+import time
 import email
 import urllib.request
 import urllib.error
@@ -18,6 +19,7 @@ FAQ_PATH = os.path.join(BASE_DIR, "고객대응FAQ.doc")
 
 
 def _load_dotenv() -> None:
+    """로컬 개발용. Vercel은 대시보드 Environment Variables를 사용합니다."""
     env_path = os.path.join(BASE_DIR, ".env")
     if not os.path.isfile(env_path):
         return
@@ -37,10 +39,14 @@ KANANA_BASE_URL = os.environ.get(
     "KANANA_BASE_URL",
     "https://kanana-o.a2s-endpoint.kr-central-2.kakaocloud.com/v1",
 )
-KANANA_API_KEY = os.environ.get("KANANA_API_KEY", "")
 KANANA_MODEL = os.environ.get("KANANA_MODEL", "kanana-o")
+KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55"))
 
 RETRIEVAL_TOP_K = 5
+RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "1.5"))
+
+REDIS_HISTORY_KEY = "faq:chat:recent"
+REDIS_HISTORY_LIMIT = 10
 
 # ──────────────────────────────────────────────
 # 1. MHTML → Plain Text
@@ -173,24 +179,98 @@ class BM25:
 
 
 # ──────────────────────────────────────────────
-# 4. Initialise index at startup
+# 4. FAQ index (lazy — Vercel cold start 대비)
 # ──────────────────────────────────────────────
 
-print("[*] FAQ 문서 로딩 중...")
-_faq_text = _load_faq_text()
-_chunks = _chunk_by_faq_number(_faq_text)
-_retriever = BM25(_chunks)
-print(f"[+] 인덱싱 완료: {len(_chunks)}개 청크")
+_chunks: list[str] | None = None
+_retriever: BM25 | None = None
+
+
+def _kanana_api_key() -> str:
+    return (os.environ.get("KANANA_API_KEY") or "").strip()
+
+
+def _ensure_index() -> None:
+    global _chunks, _retriever
+    if _retriever is not None:
+        return
+    print("[*] FAQ 문서 로딩 중...")
+    faq_text = _load_faq_text()
+    _chunks = _chunk_by_faq_number(faq_text)
+    _retriever = BM25(_chunks)
+    print(f"[+] 인덱싱 완료: {len(_chunks)}개 청크")
 
 # ──────────────────────────────────────────────
 # 5. Kanana-o LLM (direct HTTP, no openai lib)
 # ──────────────────────────────────────────────
 
-_PROMPT_TEMPLATE = """\
-다음은 사내 고객대응 FAQ 문서에서 발췌한 내용입니다. 이 문서 내용만 사용해서 질문에 답변하세요.
-문서에 없는 내용은 추측하지 말고 "FAQ에서 확인되지 않습니다. 담당자에게 문의해 주세요."라고 안내하세요.
-접속 경로, 메뉴, URL 등 구체적 절차를 포함해서 답변하세요.
+_ESCALATION_CONTACTS = """\
+■ 대표문의
+  고객센터 (02-6252-0000 / mplace@cj.net)
 
+■ 영업문의 (메시징 일반, 세일즈포스, 컴원 연동)
+  홍윤표님 (02-6252-0359 / yp.hong1@cj.net)
+  한건영님 (02-6252-0487 / ky.han1@cj.net)
+
+■ 정책문의
+  김민정님 (02-6252-0733 / mj.kim129@cj.net)
+
+■ 정산문의
+  박지은님 (02-6252-0783 / jieun.park35@cj.net)
+  류현애님 (02-6252-0816 / hyn4737@cj.net)
+
+■ 계정발급
+  류현애님 (02-6252-0816 / hyn4737@cj.net)
+
+■ 발신번호 (승인담당)
+  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+
+■ 대량발송
+  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+
+■ 스팸대응
+  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+
+■ 개발문의
+  · 엠플레이스: 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net), 황주현님 (02-6252-0797 / juhyun.hwang@cj.net)
+  · 컴원: 황주현님 (02-6252-0797 / juhyun.hwang@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
+  · APIPLEX: 황주현님 (02-6252-0797 / juhyun.hwang@cj.net)
+  · 게이트웨이 / REST API 연동: 김동준님 (02-6361-2811 / dongjun.kim16@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
+  · Agent 연동: 강전호님 (02-6361-2844 / jeonho.kang@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
+  · 세일즈포스 연동: 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net), 강전호님 (02-6361-2844 / jeonho.kang@cj.net)
+  · 기술일반: 이민규님 (02-6252-0735 / mingyu.lee@cj.net)
+
+■ 담당자 판단이 어려울 때
+  mplace@cj.net 을 수신/참조로 보내시면 전체 담당자에게 전달되어 문의 처리를 지원합니다.
+  개발 관련 문의는 devops@cj.net 을 수신/참조로 보내 주세요."""
+
+
+def _no_faq_answer() -> str:
+    return (
+        "FAQ 문서에서 질문과 관련된 내용을 찾을 수 없습니다. "
+        "추측하거나 임의로 답변드리지 않습니다. 아래 담당자에게 문의해 주세요.\n\n"
+        + _ESCALATION_CONTACTS
+    )
+
+
+def _retrieval_is_weak(results: list[tuple[str, float]]) -> bool:
+    if not results:
+        return True
+    return results[0][1] < RETRIEVAL_MIN_SCORE
+
+
+_PROMPT_TEMPLATE = """\
+당신은 사내 고객대응 FAQ 챗봇입니다. 아래 [FAQ 발췌] 내용만 근거로 답변하세요.
+
+[필수 규칙]
+1. FAQ에 없는 사실·숫자·절차·정책을 절대 지어내지 마세요. 확실하지 않으면 답하지 마세요.
+2. 질문에 답할 근거가 FAQ 발췌에 없거나 부족하면, 반드시 아래 형식으로만 답하세요.
+   - 첫 줄: "FAQ 문서에서 질문과 관련된 내용을 찾을 수 없습니다. 추측하여 답변드리지 않습니다."
+   - 이어서 질문 주제에 맞는 담당자(아래 [담당자 연락처])만 골라 안내하세요. 해당 없으면 대표문의·판단 어려울 때 안내를 포함하세요.
+   - 담당자 연락처는 아래 목록을 그대로 사용하고, 임의로 바꾸거나 생략하지 마세요.
+3. FAQ에 근거가 충분할 때만 답변하세요. 접속 경로, 메뉴, URL 등 문서에 있는 구체적 절차를 포함하세요.
+
+[FAQ 발췌]
 --- 문서 1 ---
 {doc1}
 
@@ -200,14 +280,25 @@ _PROMPT_TEMPLATE = """\
 --- 문서 3 ---
 {doc3}
 
+[담당자 연락처]
+{contacts}
+
 질문: {question}
 답변:"""
 
 
 def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
-    docs = context[:3] + ["(없음)"] * (3 - len(context))
+    api_key = _kanana_api_key()
+    if not api_key:
+        return "⚠️ KANANA_API_KEY가 설정되지 않았습니다. Vercel Environment Variables를 확인해 주세요."
+
+    docs = context[:3] + ["(FAQ 발췌 없음)"] * (3 - len(context))
     prompt = _PROMPT_TEMPLATE.format(
-        doc1=docs[0], doc2=docs[1], doc3=docs[2], question=question
+        doc1=docs[0],
+        doc2=docs[1],
+        doc3=docs[2],
+        contacts=_ESCALATION_CONTACTS,
+        question=question,
     )
     messages = []
     for m in history[-4:]:
@@ -220,13 +311,13 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
         data=body,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {KANANA_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
         },
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=KANANA_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
@@ -247,7 +338,94 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
 
 
 # ──────────────────────────────────────────────
-# 6. Flask App
+# 6. Upstash Redis (질문/답변 이력)
+# ──────────────────────────────────────────────
+
+def _redis_configured() -> bool:
+    return bool(
+        (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
+        and (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+    )
+
+
+def _upstash_request(commands) -> dict | list | None:
+    url = (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
+    token = (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+    if not url or not token:
+        return None
+    body = json.dumps(commands, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[!] Upstash Redis 오류: {e}")
+        return None
+
+
+def _save_chat_history(question: str, answer: str) -> None:
+    if not _redis_configured():
+        return
+    item = json.dumps(
+        {
+            "question": question,
+            "answer": answer,
+            "ts": int(time.time() * 1000),
+        },
+        ensure_ascii=False,
+    )
+    resp = _upstash_request(
+        [
+            ["LPUSH", REDIS_HISTORY_KEY, item],
+            ["LTRIM", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)],
+        ]
+    )
+    if resp is None:
+        return
+    if isinstance(resp, list):
+        for part in resp:
+            if isinstance(part, dict) and part.get("error"):
+                print(f"[!] Upstash 저장 오류: {part['error']}")
+    elif isinstance(resp, dict) and resp.get("error"):
+        print(f"[!] Upstash 저장 오류: {resp['error']}")
+
+
+def _get_chat_history() -> list[dict]:
+    if not _redis_configured():
+        return []
+    resp = _upstash_request(["LRANGE", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)])
+    if not resp:
+        return []
+    if isinstance(resp, list):
+        raw = resp[0].get("result", []) if resp and isinstance(resp[0], dict) else []
+    elif isinstance(resp, dict):
+        if resp.get("error"):
+            print(f"[!] Upstash 조회 오류: {resp['error']}")
+            return []
+        raw = resp.get("result") or []
+    else:
+        return []
+    items: list[dict] = []
+    for entry in raw:
+        if isinstance(entry, bytes):
+            entry = entry.decode("utf-8")
+        try:
+            items.append(json.loads(entry))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return items
+
+
+# ──────────────────────────────────────────────
+# 7. Flask App
 # ──────────────────────────────────────────────
 
 app = Flask(__name__)
@@ -260,12 +438,14 @@ _HTML_TEMPLATE = open(
 
 @app.route("/")
 def index():
-    html = _HTML_TEMPLATE.replace("{{ chunk_count }}", str(len(_chunks)))
+    _ensure_index()
+    html = _HTML_TEMPLATE.replace("{{ chunk_count }}", str(len(_chunks or [])))
     return Response(html, content_type="text/html; charset=utf-8")
 
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
+    _ensure_index()
     data = request.get_json()
     question = (data.get("question") or "").strip()
     history = data.get("history", [])
@@ -273,12 +453,17 @@ def chat():
     if not question:
         return jsonify({"error": "질문을 입력해 주세요."}), 400
 
-    results = _retriever.search(question, k=RETRIEVAL_TOP_K)
+    results = _retriever.search(question, k=RETRIEVAL_TOP_K)  # type: ignore[union-attr]
     context_docs = [doc for doc, _ in results]
     refs = [
         {"text": doc[:300] + ("..." if len(doc) > 300 else ""), "score": round(sc, 2)}
         for doc, sc in results
     ]
+
+    if _retrieval_is_weak(results):
+        answer = _no_faq_answer()
+        _save_chat_history(question, answer)
+        return jsonify({"answer": answer, "references": refs})
 
     answer = _call_kanana(question, context_docs, history)
 
@@ -289,7 +474,13 @@ def chat():
             fallback += f"━━ 검색 결과 {i} ━━\n{doc}\n\n"
         answer = answer + "\n\n" + fallback
 
+    _save_chat_history(question, answer)
     return jsonify({"answer": answer, "references": refs})
+
+
+@app.route("/api/history", methods=["GET"])
+def chat_history():
+    return jsonify({"items": _get_chat_history(), "enabled": _redis_configured()})
 
 
 if __name__ == "__main__":

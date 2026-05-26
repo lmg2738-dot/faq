@@ -29,6 +29,105 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+#app-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#main-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+#history-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  background: var(--card);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#history-sidebar .sidebar-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#history-sidebar .sidebar-header span.count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-light);
+  background: #f1f5f9;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+#history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.history-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+  background: #fafbfc;
+}
+.history-item:hover {
+  border-color: var(--primary);
+  background: #f0f7ff;
+}
+.history-item .q {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.history-item .a {
+  font-size: 12px;
+  color: var(--text-light);
+  margin-top: 6px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.history-item .time {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 6px;
+}
+
+.history-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-light);
+  line-height: 1.5;
 }
 
 header {
@@ -69,7 +168,7 @@ header .badge {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  max-width: 800px;
+  max-width: 900px;
   width: 100%;
   margin: 0 auto;
 }
@@ -153,7 +252,7 @@ header .badge {
 #input-area form {
   display: flex;
   gap: 10px;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
 }
 
@@ -197,6 +296,10 @@ header .badge {
 @keyframes bounce { to { transform: translateY(-6px); opacity: .4; } }
 @keyframes fadeIn  { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
+@media (max-width: 900px) {
+  #history-sidebar { display: none; }
+}
+
 @media (max-width: 600px) {
   header { padding: 10px 14px; }
   .msg { max-width: 92%; }
@@ -214,33 +317,111 @@ header .badge {
   <span class="badge">인덱스: {{ chunk_count }}개 청크</span>
 </header>
 
-<div id="chat-area">
-  <div class="welcome" id="welcome">
-    <div class="icon">💬</div>
-    <h2>무엇을 도와드릴까요?</h2>
-    <p>고객대응FAQ 문서를 기반으로 질문에 답변합니다.</p>
-    <div class="chips">
-      <div class="chip" onclick="askChip(this)">발신프로필 삭제 방법</div>
-      <div class="chip" onclick="askChip(this)">템플릿 검수 상태 확인</div>
-      <div class="chip" onclick="askChip(this)">알림톡 미수신 확인</div>
-      <div class="chip" onclick="askChip(this)">친구톡 이미지 사이즈</div>
+<div id="app-layout">
+  <div id="main-column">
+    <div id="chat-area">
+      <div class="welcome" id="welcome">
+        <div class="icon">💬</div>
+        <h2>무엇을 도와드릴까요?</h2>
+        <p>고객대응FAQ 문서를 기반으로 질문에 답변합니다.</p>
+        <div class="chips">
+          <div class="chip" onclick="askChip(this)">발신프로필 삭제 방법</div>
+          <div class="chip" onclick="askChip(this)">템플릿 검수 상태 확인</div>
+          <div class="chip" onclick="askChip(this)">알림톡 미수신 확인</div>
+          <div class="chip" onclick="askChip(this)">친구톡 이미지 사이즈</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-area">
+      <form id="chat-form" onsubmit="return sendMessage(event)">
+        <input id="user-input" type="text" placeholder="질문을 입력하세요..." autocomplete="off">
+        <button type="submit" id="send-btn">전송</button>
+      </form>
     </div>
   </div>
-</div>
 
-<div id="input-area">
-  <form id="chat-form" onsubmit="return sendMessage(event)">
-    <input id="user-input" type="text" placeholder="질문을 입력하세요..." autocomplete="off">
-    <button type="submit" id="send-btn">전송</button>
-  </form>
+  <aside id="history-sidebar">
+    <div class="sidebar-header">
+      최근 질문·답변
+      <span class="count" id="history-count">0</span>
+    </div>
+    <div id="history-list">
+      <div class="history-empty" id="history-empty">아직 저장된 대화가 없습니다.</div>
+    </div>
+  </aside>
 </div>
 
 <script>
-const chatArea   = document.getElementById('chat-area');
-const userInput  = document.getElementById('user-input');
-const sendBtn    = document.getElementById('send-btn');
-const welcome    = document.getElementById('welcome');
+const chatArea      = document.getElementById('chat-area');
+const userInput     = document.getElementById('user-input');
+const sendBtn       = document.getElementById('send-btn');
+const welcome       = document.getElementById('welcome');
+const historyList   = document.getElementById('history-list');
+const historyEmpty  = document.getElementById('history-empty');
+const historyCount  = document.getElementById('history-count');
 let history = [];
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleString('ko-KR', {
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function truncate(s, n) {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+async function loadRecentHistory() {
+  try {
+    const res = await fetch('/api/history');
+    const data = await res.json();
+    renderRecentHistory(data.items || [], data.enabled);
+  } catch (_) {
+    renderRecentHistory([], false);
+  }
+}
+
+function renderRecentHistory(items, enabled) {
+  historyList.querySelectorAll('.history-item').forEach(el => el.remove());
+
+  if (!enabled) {
+    historyEmpty.style.display = 'block';
+    historyEmpty.textContent = 'Redis 미연결 (Upstash 환경 변수 확인)';
+    historyCount.textContent = '0';
+    return;
+  }
+
+  if (!items.length) {
+    historyEmpty.style.display = 'block';
+    historyEmpty.textContent = '아직 저장된 대화가 없습니다.';
+    historyCount.textContent = '0';
+    return;
+  }
+
+  historyEmpty.style.display = 'none';
+  historyCount.textContent = String(items.length);
+
+  items.forEach(item => {
+    const el = document.createElement('div');
+    el.className = 'history-item';
+    el.innerHTML =
+      '<div class="q">' + escHtml(item.question || '') + '</div>' +
+      '<div class="a">' + escHtml(truncate(item.answer || '', 180)) + '</div>' +
+      '<div class="time">' + escHtml(formatTime(item.ts)) + '</div>';
+    el.onclick = () => {
+      userInput.value = item.question || '';
+      userInput.focus();
+    };
+    historyList.appendChild(el);
+  });
+}
+
+loadRecentHistory();
 
 function askChip(el) {
   userInput.value = el.textContent;
@@ -331,6 +512,7 @@ async function sendMessage(e) {
     } else {
       addMsg('bot', escHtml(data.answer), data.references);
       history.push({role: 'assistant', content: data.answer});
+      loadRecentHistory();
     }
   } catch (err) {
     removeTyping();
