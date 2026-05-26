@@ -35,12 +35,7 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-KANANA_BASE_URL = os.environ.get(
-    "KANANA_BASE_URL",
-    "https://kanana-o.a2s-endpoint.kr-central-2.kakaocloud.com/v1",
-)
-KANANA_MODEL = os.environ.get("KANANA_MODEL", "kanana-o")
-KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55"))
+KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55") or "55")
 
 RETRIEVAL_TOP_K = 5
 RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "1.5"))
@@ -186,8 +181,28 @@ _chunks: list[str] | None = None
 _retriever: BM25 | None = None
 
 
+def _env_clean(name: str) -> str:
+    raw = (os.environ.get(name) or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    return raw
+
+
 def _kanana_api_key() -> str:
-    return (os.environ.get("KANANA_API_KEY") or "").strip()
+    return _env_clean("KANANA_API_KEY")
+
+
+def _kanana_base_url() -> str:
+    url = _env_clean("KANANA_BASE_URL") or (
+        "https://kanana-o.a2s-endpoint.kr-central-2.kakaocloud.com/v1"
+    )
+    return url.rstrip("/")
+
+
+def _kanana_model() -> str:
+    return _env_clean("KANANA_MODEL") or "kanana-o"
 
 
 def _ensure_index() -> None:
@@ -287,10 +302,15 @@ _PROMPT_TEMPLATE = """\
 답변:"""
 
 
-def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
+def _call_kanana(question: str, context: list[str], history: list[dict]) -> tuple[str, str | None]:
+    """반환: (답변 텍스트, 오류 종류 — auth|config|quota|server|api|network|None)"""
     api_key = _kanana_api_key()
     if not api_key:
-        return "⚠️ KANANA_API_KEY가 설정되지 않았습니다. Vercel Environment Variables를 확인해 주세요."
+        return (
+            "⚠️ KANANA_API_KEY가 설정되지 않았습니다.\n"
+            "Vercel → Settings → Environment Variables에 키를 등록한 뒤 Redeploy 해 주세요.",
+            "config",
+        )
 
     docs = context[:3] + ["(FAQ 발췌 없음)"] * (3 - len(context))
     prompt = _PROMPT_TEMPLATE.format(
@@ -305,9 +325,11 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": prompt})
 
-    body = json.dumps({"model": KANANA_MODEL, "messages": messages}).encode("utf-8")
+    body = json.dumps(
+        {"model": _kanana_model(), "messages": messages}, ensure_ascii=False
+    ).encode("utf-8")
     req = urllib.request.Request(
-        f"{KANANA_BASE_URL}/chat/completions",
+        f"{_kanana_base_url()}/chat/completions",
         data=body,
         headers={
             "Content-Type": "application/json",
@@ -319,22 +341,40 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> str:
     try:
         with urllib.request.urlopen(req, timeout=KANANA_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"], None
     except urllib.error.HTTPError as e:
         code = e.code
         try:
             detail = json.loads(e.read().decode("utf-8"))
         except Exception:
             detail = {}
+        err_body = detail.get("error")
+        if isinstance(err_body, dict):
+            err_msg = err_body.get("message") or str(err_body)
+        else:
+            err_msg = err_body or e.reason
         if code == 429:
-            return "⚠️ 일일 API 쿼터(10회)를 모두 소진하였습니다. 내일 00시에 초기화됩니다."
-        if code == 401:
-            return "⚠️ API 키가 유효하지 않습니다. 설정을 확인해 주세요."
+            return (
+                "⚠️ 일일 API 쿼터(10회)를 모두 소진하였습니다. 내일 00시에 초기화됩니다.",
+                "quota",
+            )
+        if code in (401, 403):
+            return (
+                "⚠️ API 키가 유효하지 않습니다.\n"
+                "1) Vercel Environment Variables의 KANANA_API_KEY에 신규 키만 입력(따옴표 없음)\n"
+                "2) Production·Preview 모두 적용 여부 확인\n"
+                "3) 저장 후 Redeploy\n"
+                f"(서버 응답: {err_msg})",
+                "auth",
+            )
         if code == 500:
-            return "⚠️ GPU 서버 요청 폭주로 처리가 지연되고 있습니다. 잠시 후 다시 시도해 주세요."
-        return f"⚠️ API 오류 ({code}): {detail.get('error', e.reason)}"
+            return (
+                "⚠️ GPU 서버 요청 폭주로 처리가 지연되고 있습니다. 잠시 후 다시 시도해 주세요.",
+                "server",
+            )
+        return f"⚠️ API 오류 ({code}): {err_msg}", "api"
     except Exception as e:
-        return f"⚠️ API 호출 중 오류 발생: {e}"
+        return f"⚠️ API 호출 중 오류 발생: {e}", "network"
 
 
 # ──────────────────────────────────────────────
@@ -465,10 +505,9 @@ def chat():
         _save_chat_history(question, answer)
         return jsonify({"answer": answer, "references": refs})
 
-    answer = _call_kanana(question, context_docs, history)
+    answer, err_kind = _call_kanana(question, context_docs, history)
 
-    is_error = answer.startswith("⚠️")
-    if is_error and context_docs:
+    if err_kind in ("quota", "server", "api", "network") and context_docs:
         fallback = "🔍 API를 사용할 수 없어 FAQ 검색 결과를 직접 보여드립니다.\n\n"
         for i, doc in enumerate(context_docs[:3], 1):
             fallback += f"━━ 검색 결과 {i} ━━\n{doc}\n\n"
@@ -481,6 +520,21 @@ def chat():
 @app.route("/api/history", methods=["GET"])
 def chat_history():
     return jsonify({"items": _get_chat_history(), "enabled": _redis_configured()})
+
+
+@app.route("/api/status", methods=["GET"])
+def api_status():
+    """키 값은 노출하지 않고, 배포 환경 설정 여부만 확인합니다."""
+    key = _kanana_api_key()
+    return jsonify(
+        {
+            "kanana_key_set": bool(key),
+            "kanana_key_length": len(key),
+            "kanana_base_url": _kanana_base_url(),
+            "kanana_model": _kanana_model(),
+            "redis_enabled": _redis_configured(),
+        }
+    )
 
 
 if __name__ == "__main__":
