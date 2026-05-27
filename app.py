@@ -38,7 +38,7 @@ _load_dotenv()
 KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55") or "55")
 
 RETRIEVAL_TOP_K = 5
-RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "4.0"))
+RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "5.5"))
 
 REDIS_HISTORY_KEY = "faq:chat:recent"
 REDIS_HISTORY_LIMIT = 10
@@ -220,44 +220,32 @@ def _ensure_index() -> None:
 # ──────────────────────────────────────────────
 
 _ESCALATION_CONTACTS = """\
-■ 대표문의
-  고객센터 (02-6252-0000 / mplace@cj.net)
+대표문의 : 고객센터(02-6252-0000 / mplace@cj.net)
 
-■ 영업문의 (메시징 일반, 세일즈포스, 컴원 연동)
-  홍윤표님 (02-6252-0359 / yp.hong1@cj.net)
-  한건영님 (02-6252-0487 / ky.han1@cj.net)
+영업문의 : 메시징 일반, 세일즈포스, 컴원 연동 - 홍윤표님 (02-6252-0359 / yp.hong1@cj.net), 한건영님(02-6252-0487 / ky.han1@cj.net)
 
-■ 정책문의
-  김민정님 (02-6252-0733 / mj.kim129@cj.net)
+정책문의 : 김민정님 (02-6252-0733 / mj.kim129@cj.net)
 
-■ 정산문의
-  박지은님 (02-6252-0783 / jieun.park35@cj.net)
-  류현애님 (02-6252-0816 / hyn4737@cj.net)
+정산문의 : 박지은님 (02-6252-0783 / jieun.park35@cj.net), 류현애님 (02-6252-0816 / hyn4737@cj.net)
 
-■ 계정발급
-  류현애님 (02-6252-0816 / hyn4737@cj.net)
+계정발급 : 류현애님 (02-6252-0816 / hyn4737@cj.net)
 
-■ 발신번호 (승인담당)
-  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+발신번호 : 승인담당자 - 김수정님 (02-6252-0750 / sujung.kim16@cj.net)
 
-■ 대량발송
-  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+대량발송 : 김수정님 (02-6252-0750 / sujung.kim16@cj.net)
 
-■ 스팸대응
-  김수정님 (02-6252-0750 / sujung.kim16@cj.net)
+스팸대응 : 김수정님 (02-6252-0750 / sujung.kim16@cj.net)
 
-■ 개발문의
-  · 엠플레이스: 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net), 황주현님 (02-6252-0797 / juhyun.hwang@cj.net)
-  · 컴원: 황주현님 (02-6252-0797 / juhyun.hwang@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
-  · APIPLEX: 황주현님 (02-6252-0797 / juhyun.hwang@cj.net)
-  · 게이트웨이 / REST API 연동: 김동준님 (02-6361-2811 / dongjun.kim16@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
-  · Agent 연동: 강전호님 (02-6361-2844 / jeonho.kang@cj.net), 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net)
-  · 세일즈포스 연동: 서명주님 (02-6361-2841 / myeongjoo.seo@cj.net), 강전호님 (02-6361-2844 / jeonho.kang@cj.net)
-  · 기술일반: 이민규님 (02-6252-0735 / mingyu.lee@cj.net)
+개발문의 : 엠플레이스 - 서명주님(02-6361-2841 / myeongjoo.seo@cj.net), 황주현님(02-6252-0797 / juhyun.hwang@cj.net)
+  컴원 - 황주현님(02-6252-0797 / juhyun.hwang@cj.net), 서명주님(02-6361-2841 / myeongjoo.seo@cj.net)
+  APIPLEX - 황주현님(02-6252-0797 / juhyun.hwang@cj.net)
+  게이트웨이 / REST API 연동 - 김동준님 (02-6361-2811 / dongjun.kim16@cj.net), 서명주님(02-6361-2841 / myeongjoo.seo@cj.net)
+  Agent 연동 - 강전호님 (02-6361-2844 / jeonho.kang@cj.net), 서명주님(02-6361-2841 / myeongjoo.seo@cj.net)
+  세일즈포스연동 - 서명주님(02-6361-2841 / myeongjoo.seo@cj.net), 강전호님 (02-6361-2844 / jeonho.kang@cj.net)
+  기술일반 문의 - 이민규님 (02-6252-0735 / mingyu.lee@cj.net)
 
-■ 담당자 판단이 어려울 때
-  mplace@cj.net 을 수신/참조로 보내시면 전체 담당자에게 전달되어 문의 처리를 지원합니다.
-  개발 관련 문의는 devops@cj.net 을 수신/참조로 보내 주세요."""
+담당자 판단이 어려울 경우 "mplace@cj.net"을 수신/참조시 전체담당자에게 전달이 되어 원활한 문의 처리 지원이 이루어질 수 있습니다.
+개발관련 문의는 "devops@cj.net"을 수신/참조로 보내주시기 바랍니다."""
 
 
 _ESCALATE_TOKEN = "[ESCALATE]"
@@ -266,6 +254,9 @@ _NOT_FOUND_MARKERS = (
     "찾을 수 없",
     "확인되지 않",
     "문서에 없",
+    "제공된 문서",
+    "이 문서만으로",
+    "판단할 수 없",
     "faq에서",
     "faq 문서",
     "추측하여",
@@ -273,8 +264,26 @@ _NOT_FOUND_MARKERS = (
     "임의로",
     "근거가 없",
     "관련된 내용을 찾을",
+    "관련 내용을 찾을",
     "답변드리지 않",
     "확인해 주세요",
+    "죄송하지만",
+    "죄송합니다",
+    "알 수 없",
+    "정보가 없",
+    "포함되어 있지 않",
+    "포함되지 않",
+    "언급되지 않",
+    "담당 부서",
+    "담당자에게",
+    "고객센터에 문의",
+    "공식 고객센터",
+    "연락처나 접속",
+    "알려주시면",
+    "안내해 드리",
+    "안내해드리",
+    "도움을 드리",
+    "도와드리",
 )
 
 _STOP_TERMS = frozenset(
@@ -306,36 +315,13 @@ def _significant_terms(text: str) -> list[str]:
     return [w for w in words if w not in _STOP_TERMS and len(w) >= 2]
 
 
-def _no_faq_answer(question: str = "") -> str:
-    intro = (
+def _no_faq_answer(_question: str = "") -> str:
+    """FAQ 미포함 시 항상 동일한 고정 안내 (LLM 임의 문구 사용 금지)."""
+    return (
         "FAQ 문서에서 질문과 관련된 내용을 찾을 수 없습니다. "
         "추측하거나 임의로 답변드리지 않습니다. 아래 담당자에게 문의해 주세요.\n\n"
+        + _ESCALATION_CONTACTS
     )
-    q = (question or "").lower()
-    hint = ""
-    if any(
-        k in q
-        for k in (
-            "개발",
-            "api",
-            "연동",
-            "agent",
-            "게이트",
-            "rest",
-            "컴원",
-            "apiplex",
-            "세일즈포스",
-            "엠플레이스",
-        )
-    ):
-        hint = "※ 개발 관련 문의는 devops@cj.net 을 수신/참조로 보내 주세요.\n\n"
-    elif any(k in q for k in ("정산", "계정발급", "계정", "발신번호", "발신", "스팸", "대량발송", "대량")):
-        hint = "※ 정산·계정·발신·발송 관련은 아래 해당 담당자에게 문의해 주세요.\n\n"
-    elif any(k in q for k in ("영업", "세일즈", "컴원", "메시징")):
-        hint = "※ 영업·연동 관련은 아래 영업문의 담당자에게 문의해 주세요.\n\n"
-    elif any(k in q for k in ("정책",)):
-        hint = "※ 정책 관련은 아래 정책문의 담당자에게 문의해 주세요.\n\n"
-    return intro + hint + _ESCALATION_CONTACTS
 
 
 def _faq_has_sufficient_context(
@@ -360,8 +346,11 @@ def _faq_has_sufficient_context(
         return top_score >= RETRIEVAL_MIN_SCORE * 1.5
 
     hits = sum(1 for t in terms if t in top_doc)
-    need = max(1, (len(terms) + 1) // 2)
-    return hits >= need
+    if hits < len(terms):
+        return False
+    if len(terms) <= 4 and hits != len(terms):
+        return False
+    return True
 
 
 def _answer_grounded_in_docs(answer: str, docs: list[str], question: str) -> bool:
@@ -388,6 +377,21 @@ def _answer_grounded_in_docs(answer: str, docs: list[str], question: str) -> boo
     return True
 
 
+def _llm_answer_implies_no_faq(text: str) -> bool:
+    """LLM이 '문서에 없다'류로 답한 경우 → 고정 담당자 안내로 교체."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if _ESCALATE_TOKEN in t:
+        return True
+    if any(m in t for m in _NOT_FOUND_MARKERS):
+        return True
+    if "mplace@cj.net" not in t and "02-6252" not in t:
+        if re.search(r"(없습니다|없어요|모릅니다|알 수 없)", t):
+            return True
+    return False
+
+
 def _should_escalate_llm_answer(
     question: str,
     answer: str,
@@ -395,11 +399,7 @@ def _should_escalate_llm_answer(
     results: list[tuple[str, float]],
 ) -> bool:
     text = (answer or "").strip()
-    if not text:
-        return True
-    if _ESCALATE_TOKEN in text:
-        return True
-    if any(m in text for m in _NOT_FOUND_MARKERS):
+    if _llm_answer_implies_no_faq(text):
         return True
     if not _faq_has_sufficient_context(question, results):
         return True
@@ -415,7 +415,7 @@ def _finalize_faq_answer(
     results: list[tuple[str, float]],
 ) -> str:
     if _should_escalate_llm_answer(question, answer, docs, results):
-        return _no_faq_answer(question)
+        return _no_faq_answer()
     return answer.strip()
 
 
@@ -677,7 +677,7 @@ def chat():
     ]
 
     if not _faq_has_sufficient_context(question, results):
-        answer = _no_faq_answer(question)
+        answer = _no_faq_answer()
         _save_chat_history(question, answer)
         return jsonify({"answer": answer, "references": refs})
 
