@@ -38,7 +38,7 @@ _load_dotenv()
 KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55") or "55")
 
 RETRIEVAL_TOP_K = 5
-RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "1.5"))
+RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "4.0"))
 
 REDIS_HISTORY_KEY = "faq:chat:recent"
 REDIS_HISTORY_LIMIT = 10
@@ -260,30 +260,174 @@ _ESCALATION_CONTACTS = """\
   개발 관련 문의는 devops@cj.net 을 수신/참조로 보내 주세요."""
 
 
-def _no_faq_answer() -> str:
-    return (
+_ESCALATE_TOKEN = "[ESCALATE]"
+
+_NOT_FOUND_MARKERS = (
+    "찾을 수 없",
+    "확인되지 않",
+    "문서에 없",
+    "faq에서",
+    "faq 문서",
+    "추측하여",
+    "추측하",
+    "임의로",
+    "근거가 없",
+    "관련된 내용을 찾을",
+    "답변드리지 않",
+    "확인해 주세요",
+)
+
+_STOP_TERMS = frozenset(
+    {
+        "있는",
+        "없는",
+        "하는",
+        "되는",
+        "어떻게",
+        "무엇",
+        "방법",
+        "문의",
+        "관련",
+        "확인",
+        "알려",
+        "주세요",
+        "가능",
+        "대한",
+        "어디",
+        "무엇인가요",
+        "알려주세요",
+        "해주세요",
+    }
+)
+
+
+def _significant_terms(text: str) -> list[str]:
+    words = re.findall(r"[a-z0-9]{2,}|[가-힣]{2,}", (text or "").lower())
+    return [w for w in words if w not in _STOP_TERMS and len(w) >= 2]
+
+
+def _no_faq_answer(question: str = "") -> str:
+    intro = (
         "FAQ 문서에서 질문과 관련된 내용을 찾을 수 없습니다. "
         "추측하거나 임의로 답변드리지 않습니다. 아래 담당자에게 문의해 주세요.\n\n"
-        + _ESCALATION_CONTACTS
     )
+    q = (question or "").lower()
+    hint = ""
+    if any(
+        k in q
+        for k in (
+            "개발",
+            "api",
+            "연동",
+            "agent",
+            "게이트",
+            "rest",
+            "컴원",
+            "apiplex",
+            "세일즈포스",
+            "엠플레이스",
+        )
+    ):
+        hint = "※ 개발 관련 문의는 devops@cj.net 을 수신/참조로 보내 주세요.\n\n"
+    elif any(k in q for k in ("정산", "계정발급", "계정", "발신번호", "발신", "스팸", "대량발송", "대량")):
+        hint = "※ 정산·계정·발신·발송 관련은 아래 해당 담당자에게 문의해 주세요.\n\n"
+    elif any(k in q for k in ("영업", "세일즈", "컴원", "메시징")):
+        hint = "※ 영업·연동 관련은 아래 영업문의 담당자에게 문의해 주세요.\n\n"
+    elif any(k in q for k in ("정책",)):
+        hint = "※ 정책 관련은 아래 정책문의 담당자에게 문의해 주세요.\n\n"
+    return intro + hint + _ESCALATION_CONTACTS
 
 
-def _retrieval_is_weak(results: list[tuple[str, float]]) -> bool:
+def _faq_has_sufficient_context(
+    question: str, results: list[tuple[str, float]]
+) -> bool:
+    """FAQ 발췌만으로 답할 수 있을 만큼 검색 신뢰도가 높은지 판단."""
     if not results:
+        return False
+
+    top_score = results[0][1]
+    if top_score < RETRIEVAL_MIN_SCORE:
+        return False
+
+    if len(results) >= 2 and results[1][1] > 0:
+        gap = top_score - results[1][1]
+        if top_score < RETRIEVAL_MIN_SCORE * 2 and gap < 0.8:
+            return False
+
+    top_doc = results[0][0].lower()
+    terms = _significant_terms(question)
+    if not terms:
+        return top_score >= RETRIEVAL_MIN_SCORE * 1.5
+
+    hits = sum(1 for t in terms if t in top_doc)
+    need = max(1, (len(terms) + 1) // 2)
+    return hits >= need
+
+
+def _answer_grounded_in_docs(answer: str, docs: list[str], question: str) -> bool:
+    if not docs:
+        return False
+
+    combined = "\n".join(docs).lower()
+    answer_l = answer.lower()
+    terms = _significant_terms(question)
+
+    if terms:
+        in_doc = sum(1 for t in terms if t in combined)
+        in_ans = sum(1 for t in terms if t in answer_l)
+        if in_doc < max(1, len(terms) // 3):
+            return False
+        if in_ans < max(1, len(terms) // 4):
+            return False
+
+    phrases = re.findall(r"[가-힣a-z0-9]{5,}", docs[0].lower())
+    if phrases:
+        key_phrases = sorted(set(phrases), key=len, reverse=True)[:10]
+        if not any(p in answer_l for p in key_phrases[:6]):
+            return False
+    return True
+
+
+def _should_escalate_llm_answer(
+    question: str,
+    answer: str,
+    docs: list[str],
+    results: list[tuple[str, float]],
+) -> bool:
+    text = (answer or "").strip()
+    if not text:
         return True
-    return results[0][1] < RETRIEVAL_MIN_SCORE
+    if _ESCALATE_TOKEN in text:
+        return True
+    if any(m in text for m in _NOT_FOUND_MARKERS):
+        return True
+    if not _faq_has_sufficient_context(question, results):
+        return True
+    if not _answer_grounded_in_docs(text, docs, question):
+        return True
+    return False
+
+
+def _finalize_faq_answer(
+    question: str,
+    answer: str,
+    docs: list[str],
+    results: list[tuple[str, float]],
+) -> str:
+    if _should_escalate_llm_answer(question, answer, docs, results):
+        return _no_faq_answer(question)
+    return answer.strip()
 
 
 _PROMPT_TEMPLATE = """\
-당신은 사내 고객대응 FAQ 챗봇입니다. 아래 [FAQ 발췌] 내용만 근거로 답변하세요.
+당신은 사내 고객대응 FAQ 챗봇입니다. 반드시 아래 [FAQ 발췌]에 실제로 적힌 내용만으로 답변하세요.
 
-[필수 규칙]
-1. FAQ에 없는 사실·숫자·절차·정책을 절대 지어내지 마세요. 확실하지 않으면 답하지 마세요.
-2. 질문에 답할 근거가 FAQ 발췌에 없거나 부족하면, 반드시 아래 형식으로만 답하세요.
-   - 첫 줄: "FAQ 문서에서 질문과 관련된 내용을 찾을 수 없습니다. 추측하여 답변드리지 않습니다."
-   - 이어서 질문 주제에 맞는 담당자(아래 [담당자 연락처])만 골라 안내하세요. 해당 없으면 대표문의·판단 어려울 때 안내를 포함하세요.
-   - 담당자 연락처는 아래 목록을 그대로 사용하고, 임의로 바꾸거나 생략하지 마세요.
-3. FAQ에 근거가 충분할 때만 답변하세요. 접속 경로, 메뉴, URL 등 문서에 있는 구체적 절차를 포함하세요.
+[필수 규칙 — 위반 금지]
+1. FAQ 발췌에 없는 사실·숫자·절차·URL·메뉴명·정책을 절대 만들지 마세요.
+2. 질문에 직접 답할 문장이 FAQ 발췌에 없으면, 설명 없이 오직 다음 한 줄만 출력하세요:
+   {escalate_token}
+3. {escalate_token} 이외의 형태로 "모른다", "찾을 수 없다", "담당자에게 문의" 등을 쓰지 마세요. (시스템이 담당자 안내를 붙입니다)
+4. FAQ 발췌에 근거가 충분할 때만 일반 답변을 작성하세요. 답변에는 발췌에 있는 구체적 절차·경로·조건을 포함하세요.
 
 [FAQ 발췌]
 --- 문서 1 ---
@@ -294,9 +438,6 @@ _PROMPT_TEMPLATE = """\
 
 --- 문서 3 ---
 {doc3}
-
-[담당자 연락처]
-{contacts}
 
 질문: {question}
 답변:"""
@@ -317,7 +458,7 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> tupl
         doc1=docs[0],
         doc2=docs[1],
         doc3=docs[2],
-        contacts=_ESCALATION_CONTACTS,
+        escalate_token=_ESCALATE_TOKEN,
         question=question,
     )
     messages = []
@@ -381,21 +522,28 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> tupl
 # 6. Upstash Redis (질문/답변 이력)
 # ──────────────────────────────────────────────
 
+def _redis_url() -> str:
+    return _env_clean("UPSTASH_REDIS_REST_URL").rstrip("/")
+
+
+def _redis_token() -> str:
+    return _env_clean("UPSTASH_REDIS_REST_TOKEN")
+
+
 def _redis_configured() -> bool:
-    return bool(
-        (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
-        and (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
-    )
+    return bool(_redis_url() and _redis_token())
 
 
-def _upstash_request(commands) -> dict | list | None:
-    url = (os.environ.get("UPSTASH_REDIS_REST_URL") or "").strip()
-    token = (os.environ.get("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+def _upstash_post(path: str, payload) -> dict | list | None:
+    """Upstash REST API (단일 명령은 루트 URL, 파이프라인은 /pipeline)."""
+    url = _redis_url()
+    token = _redis_token()
     if not url or not token:
         return None
-    body = json.dumps(commands, ensure_ascii=False).encode("utf-8")
+    endpoint = url if not path else f"{url}/{path.lstrip('/')}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
-        url,
+        endpoint,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
@@ -406,14 +554,48 @@ def _upstash_request(commands) -> dict | list | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            detail = {"error": str(e)}
+        print(f"[!] Upstash HTTP {e.code}: {detail}")
+        return detail
     except Exception as e:
         print(f"[!] Upstash Redis 오류: {e}")
         return None
 
 
-def _save_chat_history(question: str, answer: str) -> None:
+def _upstash_command(command: list) -> dict | None:
+    resp = _upstash_post("", command)
+    return resp if isinstance(resp, dict) else None
+
+
+def _upstash_pipeline(commands: list[list]) -> list[dict] | None:
+    resp = _upstash_post("pipeline", commands)
+    return resp if isinstance(resp, list) else None
+
+
+def _parse_history_entries(raw) -> list[dict]:
+    items: list[dict] = []
+    if not isinstance(raw, list):
+        return items
+    for entry in raw:
+        if isinstance(entry, bytes):
+            entry = entry.decode("utf-8")
+        if not isinstance(entry, str):
+            continue
+        try:
+            items.append(json.loads(entry))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return items
+
+
+def _save_chat_history(question: str, answer: str) -> str | None:
+    """저장 실패 시 오류 메시지, 성공 시 None."""
     if not _redis_configured():
-        return
+        return None
     item = json.dumps(
         {
             "question": question,
@@ -422,46 +604,40 @@ def _save_chat_history(question: str, answer: str) -> None:
         },
         ensure_ascii=False,
     )
-    resp = _upstash_request(
+    pipeline = _upstash_pipeline(
         [
             ["LPUSH", REDIS_HISTORY_KEY, item],
             ["LTRIM", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)],
         ]
     )
-    if resp is None:
-        return
-    if isinstance(resp, list):
-        for part in resp:
+    if pipeline:
+        for part in pipeline:
             if isinstance(part, dict) and part.get("error"):
-                print(f"[!] Upstash 저장 오류: {part['error']}")
-    elif isinstance(resp, dict) and resp.get("error"):
-        print(f"[!] Upstash 저장 오류: {resp['error']}")
+                return str(part["error"])
+        return None
+
+    # pipeline 미지원/실패 시 단일 명령으로 재시도
+    push = _upstash_command(["LPUSH", REDIS_HISTORY_KEY, item])
+    if not push:
+        return "Redis 연결 실패"
+    if push.get("error"):
+        return str(push["error"])
+    trim = _upstash_command(["LTRIM", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)])
+    if trim and trim.get("error"):
+        return str(trim["error"])
+    return None
 
 
-def _get_chat_history() -> list[dict]:
+def _get_chat_history() -> tuple[list[dict], str | None]:
+    """(최신순 항목 목록, 오류 메시지)"""
     if not _redis_configured():
-        return []
-    resp = _upstash_request(["LRANGE", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)])
+        return [], None
+    resp = _upstash_command(["LRANGE", REDIS_HISTORY_KEY, "0", str(REDIS_HISTORY_LIMIT - 1)])
     if not resp:
-        return []
-    if isinstance(resp, list):
-        raw = resp[0].get("result", []) if resp and isinstance(resp[0], dict) else []
-    elif isinstance(resp, dict):
-        if resp.get("error"):
-            print(f"[!] Upstash 조회 오류: {resp['error']}")
-            return []
-        raw = resp.get("result") or []
-    else:
-        return []
-    items: list[dict] = []
-    for entry in raw:
-        if isinstance(entry, bytes):
-            entry = entry.decode("utf-8")
-        try:
-            items.append(json.loads(entry))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return items
+        return [], "Redis 연결 실패"
+    if resp.get("error"):
+        return [], str(resp["error"])
+    return _parse_history_entries(resp.get("result")), None
 
 
 # ──────────────────────────────────────────────
@@ -500,12 +676,15 @@ def chat():
         for doc, sc in results
     ]
 
-    if _retrieval_is_weak(results):
-        answer = _no_faq_answer()
+    if not _faq_has_sufficient_context(question, results):
+        answer = _no_faq_answer(question)
         _save_chat_history(question, answer)
         return jsonify({"answer": answer, "references": refs})
 
     answer, err_kind = _call_kanana(question, context_docs, history)
+
+    if err_kind is None:
+        answer = _finalize_faq_answer(question, answer, context_docs, results)
 
     if err_kind in ("quota", "server", "api", "network") and context_docs:
         fallback = "🔍 API를 사용할 수 없어 FAQ 검색 결과를 직접 보여드립니다.\n\n"
@@ -519,7 +698,15 @@ def chat():
 
 @app.route("/api/history", methods=["GET"])
 def chat_history():
-    return jsonify({"items": _get_chat_history(), "enabled": _redis_configured()})
+    items, err = _get_chat_history()
+    configured = _redis_configured()
+    return jsonify(
+        {
+            "items": items,
+            "enabled": configured,
+            "error": err if configured else None,
+        }
+    )
 
 
 @app.route("/api/status", methods=["GET"])
@@ -533,6 +720,8 @@ def api_status():
             "kanana_base_url": _kanana_base_url(),
             "kanana_model": _kanana_model(),
             "redis_enabled": _redis_configured(),
+            "redis_url_set": bool(_redis_url()),
+            "redis_token_length": len(_redis_token()),
         }
     )
 

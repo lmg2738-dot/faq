@@ -115,12 +115,50 @@ body {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.history-item.expanded .a {
+  display: block;
+  -webkit-line-clamp: unset;
+  max-height: 240px;
+  overflow-y: auto;
 }
 .history-item .time {
   font-size: 11px;
   color: #94a3b8;
   margin-top: 6px;
 }
+
+#history-toggle {
+  display: none;
+  margin-left: 8px;
+  background: #f1f5f9;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text);
+}
+#history-sidebar.mobile-open {
+  display: flex;
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.12);
+}
+#history-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(15,23,42,0.35);
+  z-index: 99;
+}
+#history-backdrop.show { display: block; }
 
 .history-empty {
   padding: 24px 16px;
@@ -298,6 +336,7 @@ header .badge {
 
 @media (max-width: 900px) {
   #history-sidebar { display: none; }
+  #history-toggle { display: inline-block; }
 }
 
 @media (max-width: 600px) {
@@ -314,8 +353,10 @@ header .badge {
     <h1>고객 FAQ 챗봇</h1>
     <p>고객대응FAQ 문서 기반 RAG 챗봇</p>
   </div>
+  <button type="button" id="history-toggle" aria-label="최근 질문 답변">최근 Q&A</button>
   <span class="badge">인덱스: {{ chunk_count }}개 청크</span>
 </header>
+<div id="history-backdrop"></div>
 
 <div id="app-layout">
   <div id="main-column">
@@ -360,7 +401,25 @@ const welcome       = document.getElementById('welcome');
 const historyList   = document.getElementById('history-list');
 const historyEmpty  = document.getElementById('history-empty');
 const historyCount  = document.getElementById('history-count');
+const historyToggle = document.getElementById('history-toggle');
+const historyBackdrop = document.getElementById('history-backdrop');
+const historySidebar = document.getElementById('history-sidebar');
 let history = [];
+
+function setHistoryPanel(open) {
+  if (!historySidebar) return;
+  historySidebar.classList.toggle('mobile-open', open);
+  if (historyBackdrop) historyBackdrop.classList.toggle('show', open);
+}
+
+if (historyToggle) {
+  historyToggle.addEventListener('click', () => {
+    setHistoryPanel(!historySidebar.classList.contains('mobile-open'));
+  });
+}
+if (historyBackdrop) {
+  historyBackdrop.addEventListener('click', () => setHistoryPanel(false));
+}
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -378,20 +437,28 @@ function truncate(s, n) {
 
 async function loadRecentHistory() {
   try {
-    const res = await fetch('/api/history');
+    const res = await fetch('/api/history', { cache: 'no-store' });
     const data = await res.json();
-    renderRecentHistory(data.items || [], data.enabled);
+    renderRecentHistory(data.items || [], data.enabled, data.error);
   } catch (_) {
-    renderRecentHistory([], false);
+    renderRecentHistory([], false, '이력 API 호출 실패');
   }
 }
 
-function renderRecentHistory(items, enabled) {
+function renderRecentHistory(items, enabled, errorMsg) {
   historyList.querySelectorAll('.history-item').forEach(el => el.remove());
 
   if (!enabled) {
     historyEmpty.style.display = 'block';
-    historyEmpty.textContent = 'Redis 미연결 (Upstash 환경 변수 확인)';
+    historyEmpty.textContent =
+      'Redis 미연결\nVercel에 UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN을 등록 후 Redeploy 하세요.';
+    historyCount.textContent = '0';
+    return;
+  }
+
+  if (errorMsg) {
+    historyEmpty.style.display = 'block';
+    historyEmpty.textContent = 'Redis 조회 오류: ' + errorMsg;
     historyCount.textContent = '0';
     return;
   }
@@ -404,19 +471,26 @@ function renderRecentHistory(items, enabled) {
   }
 
   historyEmpty.style.display = 'none';
-  historyCount.textContent = String(items.length);
+  historyCount.textContent = String(Math.min(items.length, 10));
 
   items.forEach(item => {
     const el = document.createElement('div');
     el.className = 'history-item';
+    const fullAnswer = item.answer || '';
     el.innerHTML =
       '<div class="q">' + escHtml(item.question || '') + '</div>' +
-      '<div class="a">' + escHtml(truncate(item.answer || '', 180)) + '</div>' +
+      '<div class="a">' + escHtml(truncate(fullAnswer, 180)) + '</div>' +
       '<div class="time">' + escHtml(formatTime(item.ts)) + '</div>';
-    el.onclick = () => {
+    el.addEventListener('click', () => {
+      const expanded = el.classList.toggle('expanded');
+      if (expanded) {
+        el.querySelector('.a').innerHTML = escHtml(fullAnswer);
+      } else {
+        el.querySelector('.a').innerHTML = escHtml(truncate(fullAnswer, 180));
+      }
       userInput.value = item.question || '';
       userInput.focus();
-    };
+    });
     historyList.appendChild(el);
   });
 }
@@ -512,7 +586,7 @@ async function sendMessage(e) {
     } else {
       addMsg('bot', escHtml(data.answer), data.references);
       history.push({role: 'assistant', content: data.answer});
-      loadRecentHistory();
+      setTimeout(loadRecentHistory, 400);
     }
   } catch (err) {
     removeTyping();
