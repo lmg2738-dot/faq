@@ -39,6 +39,25 @@ KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55") or "55")
 
 RETRIEVAL_TOP_K = 5
 RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "5.5"))
+FAQ_POLICY_VERSION = "3"
+
+_OFF_TOPIC_HINTS = (
+    "지구",
+    "태양",
+    "달",
+    "우주",
+    "날씨",
+    "주식",
+    "비트코인",
+    "축구",
+    "야구",
+    "연예인",
+    "맛집",
+    "레시피",
+    "요리법",
+    "다이어트",
+    "운세",
+)
 
 REDIS_HISTORY_KEY = "faq:chat:recent"
 REDIS_HISTORY_LIMIT = 10
@@ -255,6 +274,9 @@ _NOT_FOUND_MARKERS = (
     "확인되지 않",
     "문서에 없",
     "제공된 문서",
+    "제공된 faq",
+    "faq 문서에는",
+    "faq 문서에",
     "이 문서만으로",
     "판단할 수 없",
     "faq에서",
@@ -284,6 +306,13 @@ _NOT_FOUND_MARKERS = (
     "안내해드리",
     "도움을 드리",
     "도와드리",
+    "더 자세한",
+    "참고해 주세요",
+    "참고해 주시",
+    "과학이나",
+    "지구과학",
+    "궁금한 점이 있으시면",
+    "말씀해 주세요",
 )
 
 _STOP_TERMS = frozenset(
@@ -324,15 +353,46 @@ def _no_faq_answer(_question: str = "") -> str:
     )
 
 
+def _is_obviously_off_topic(question: str) -> bool:
+    q = (question or "").lower()
+    return any(h in q for h in _OFF_TOPIC_HINTS)
+
+
+def _bm25_scores_are_noise(
+    question: str, results: list[tuple[str, float]]
+) -> bool:
+    """점수만 높고 질문 키워드가 FAQ와 맞지 않는 경우(지구 모양 등)."""
+    if len(results) < 2:
+        return False
+    top_score = results[0][1]
+    tail_score = results[min(2, len(results) - 1)][1]
+    spread = top_score - tail_score
+    top_doc = results[0][0].lower()
+    terms = _significant_terms(question)
+    if not terms:
+        return spread < 2.0 and top_score < RETRIEVAL_MIN_SCORE * 3
+    hits = sum(1 for t in terms if t in top_doc)
+    if hits < len(terms) and spread < 2.0:
+        return True
+    close_high = sum(1 for _, s in results[:5] if s >= top_score * 0.85)
+    if close_high >= 3 and hits < len(terms):
+        return True
+    return False
+
+
 def _faq_has_sufficient_context(
     question: str, results: list[tuple[str, float]]
 ) -> bool:
     """FAQ 발췌만으로 답할 수 있을 만큼 검색 신뢰도가 높은지 판단."""
+    if _is_obviously_off_topic(question):
+        return False
     if not results:
         return False
 
     top_score = results[0][1]
     if top_score < RETRIEVAL_MIN_SCORE:
+        return False
+    if _bm25_scores_are_noise(question, results):
         return False
 
     if len(results) >= 2 and results[1][1] > 0:
@@ -343,14 +403,23 @@ def _faq_has_sufficient_context(
     top_doc = results[0][0].lower()
     terms = _significant_terms(question)
     if not terms:
-        return top_score >= RETRIEVAL_MIN_SCORE * 1.5
+        return top_score >= RETRIEVAL_MIN_SCORE * 2.5
 
     hits = sum(1 for t in terms if t in top_doc)
     if hits < len(terms):
         return False
-    if len(terms) <= 4 and hits != len(terms):
-        return False
     return True
+
+
+def _must_use_escalation_only(question: str, results: list[tuple[str, float]]) -> bool:
+    """True면 LLM 호출 없이 고정 담당자 안내만 반환."""
+    if _is_obviously_off_topic(question):
+        return True
+    if not results:
+        return True
+    if not _faq_has_sufficient_context(question, results):
+        return True
+    return False
 
 
 def _answer_grounded_in_docs(answer: str, docs: list[str], question: str) -> bool:
@@ -378,7 +447,7 @@ def _answer_grounded_in_docs(answer: str, docs: list[str], question: str) -> boo
 
 
 def _llm_answer_implies_no_faq(text: str) -> bool:
-    """LLM이 '문서에 없다'류로 답한 경우 → 고정 담당자 안내로 교체."""
+    """LLM이 '문서에 없다'류로 답하거나 FAQ 밖 지식을 섞은 경우."""
     t = (text or "").strip()
     if not t:
         return True
@@ -386,8 +455,26 @@ def _llm_answer_implies_no_faq(text: str) -> bool:
         return True
     if any(m in t for m in _NOT_FOUND_MARKERS):
         return True
+    if re.search(r"(없습니다|없어요|없음|모릅니다|알\s*수\s*없)", t):
+        return True
     if "mplace@cj.net" not in t and "02-6252" not in t:
-        if re.search(r"(없습니다|없어요|모릅니다|알 수 없)", t):
+        if re.search(r"(참고해|자료를|과학|지구과학|추가로)", t, re.I):
+            return True
+    return False
+
+
+def _answer_uses_outside_knowledge(answer: str, docs: list[str]) -> bool:
+    """FAQ 본문에 없는 단어로 질문에 답하면 차단."""
+    combined = "\n".join(docs).lower()
+    answer_l = (answer or "").lower()
+    if not combined or not answer_l:
+        return True
+    for token in set(re.findall(r"[가-힣]{2,}", answer_l)):
+        if token in _STOP_TERMS or len(token) < 2:
+            continue
+        if token in combined:
+            continue
+        if token in ("지구", "타원", "구형", "둥근", "납작", "과학", "지구과학"):
             return True
     return False
 
@@ -399,9 +486,11 @@ def _should_escalate_llm_answer(
     results: list[tuple[str, float]],
 ) -> bool:
     text = (answer or "").strip()
+    if _must_use_escalation_only(question, results):
+        return True
     if _llm_answer_implies_no_faq(text):
         return True
-    if not _faq_has_sufficient_context(question, results):
+    if _answer_uses_outside_knowledge(text, docs):
         return True
     if not _answer_grounded_in_docs(text, docs, question):
         return True
@@ -676,10 +765,17 @@ def chat():
         for doc, sc in results
     ]
 
-    if not _faq_has_sufficient_context(question, results):
+    if _must_use_escalation_only(question, results):
         answer = _no_faq_answer()
         _save_chat_history(question, answer)
-        return jsonify({"answer": answer, "references": refs})
+        return jsonify(
+            {
+                "answer": answer,
+                "references": refs,
+                "escalated": True,
+                "policy_version": FAQ_POLICY_VERSION,
+            }
+        )
 
     answer, err_kind = _call_kanana(question, context_docs, history)
 
@@ -722,6 +818,7 @@ def api_status():
             "redis_enabled": _redis_configured(),
             "redis_url_set": bool(_redis_url()),
             "redis_token_length": len(_redis_token()),
+            "faq_policy_version": FAQ_POLICY_VERSION,
         }
     )
 
