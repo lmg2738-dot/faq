@@ -36,7 +36,7 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_TIMEOUT = int(os.environ.get("OPENROUTER_TIMEOUT", "55") or "55")
+OPENROUTER_TIMEOUT = int(os.environ.get("OPENROUTER_TIMEOUT", "9") or "9")
 OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://github.com/lmg2738-dot/faq")
 OPENROUTER_APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "FAQ Chatbot")
 

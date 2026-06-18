@@ -1,15 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index"
-    }
-  ],
   "functions": {
-    "api/index.py": {
-      "maxDuration": 60,
-      "excludeFiles": "{.env,.env.*,__pycache__/**,.venv/**,venv/**,*.ps1,*.bat,install_startup.ps1,uninstall_startup.ps1,build.ps1}"
+    "app.py": {
+      "maxDuration": 10,
+      "excludeFiles": "{.env,.env.*,__pycache__/**,.venv/**,venv/**,*.ps1,*.bat,build.ps1,install_startup.ps1,uninstall_startup.ps1,start_chatbot.bat}"
     }
   }
 }

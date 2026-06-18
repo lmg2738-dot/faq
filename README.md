@@ -10,7 +10,7 @@
 | 변수 | 필수 | 설명 |
 |------|------|------|
 | `OPENROUTER_API_KEY` | 예 | OpenRouter API 키 (**Vercel에만 등록, Git/로컬 커밋 금지**) |
-| `OPENROUTER_TIMEOUT` | 아니오 | API 타임아웃(초). 기본 `55` |
+| `OPENROUTER_TIMEOUT` | 아니오 | API 타임아웃(초). Hobby 기본 `9` (함수 10초 제한) |
 | `OPENROUTER_SITE_URL` | 아니오 | OpenRouter Referer (배포 URL 권장) |
 | `OPENROUTER_APP_TITLE` | 아니오 | OpenRouter 앱 이름. 기본 `FAQ Chatbot` |
 | `UPSTASH_REDIS_REST_URL` | 아니오 | Upstash Redis REST URL (질문·답변 최근 10건 저장) |

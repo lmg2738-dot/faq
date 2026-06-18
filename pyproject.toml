@@ -1,0 +1,10 @@
+[project]
+name = "faq-chatbot"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "flask==3.1.3",
+]
+
+[tool.vercel]
+entrypoint = "app.py:app"
