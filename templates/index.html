@@ -289,9 +289,46 @@ header .badge {
 
 #input-area form {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   max-width: 900px;
   margin: 0 auto;
+  align-items: center;
+}
+
+#model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+#model-row label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+#model-select {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+
+#model-select option:disabled {
+  color: #94a3b8;
+}
+
+#chat-input-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
 }
 
 #input-area input {
@@ -376,8 +413,14 @@ header .badge {
 
     <div id="input-area">
       <form id="chat-form" onsubmit="return sendMessage(event)">
-        <input id="user-input" type="text" placeholder="질문을 입력하세요..." autocomplete="off">
-        <button type="submit" id="send-btn">전송</button>
+        <div id="model-row">
+          <label for="model-select">무료 모델 ($0)</label>
+          <select id="model-select" title="OpenRouter 무료 모델"></select>
+        </div>
+        <div id="chat-input-row">
+          <input id="user-input" type="text" placeholder="질문을 입력하세요..." autocomplete="off">
+          <button type="submit" id="send-btn">전송</button>
+        </div>
       </form>
     </div>
   </div>
@@ -404,7 +447,87 @@ const historyCount  = document.getElementById('history-count');
 const historyToggle = document.getElementById('history-toggle');
 const historyBackdrop = document.getElementById('history-backdrop');
 const historySidebar = document.getElementById('history-sidebar');
+const modelSelect   = document.getElementById('model-select');
 let history = [];
+let freeModels = [];
+let selectedModel = '';
+const DISABLED_MODELS_KEY = 'faq_disabled_openrouter_models';
+
+function getDisabledModels() {
+  try {
+    const raw = localStorage.getItem(DISABLED_MODELS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function saveDisabledModels(set) {
+  localStorage.setItem(DISABLED_MODELS_KEY, JSON.stringify([...set]));
+}
+
+function disableModels(ids) {
+  if (!ids || !ids.length) return;
+  const disabled = getDisabledModels();
+  ids.forEach(id => disabled.add(id));
+  saveDisabledModels(disabled);
+  renderModelSelect();
+}
+
+function renderModelSelect() {
+  if (!modelSelect) return;
+  const disabled = getDisabledModels();
+  modelSelect.innerHTML = '';
+  if (!freeModels.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '무료 모델 없음 (API 키 확인)';
+    modelSelect.appendChild(opt);
+    modelSelect.disabled = true;
+    return;
+  }
+  modelSelect.disabled = false;
+  let firstEnabled = '';
+  freeModels.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.name + ' ($0)';
+    if (disabled.has(m.id)) {
+      opt.disabled = true;
+      opt.textContent += ' — 사용 불가';
+    } else if (!firstEnabled) {
+      firstEnabled = m.id;
+    }
+    modelSelect.appendChild(opt);
+  });
+  if (selectedModel && !disabled.has(selectedModel)) {
+    modelSelect.value = selectedModel;
+  } else if (firstEnabled) {
+    selectedModel = firstEnabled;
+    modelSelect.value = firstEnabled;
+  }
+}
+
+async function loadFreeModels() {
+  try {
+    const res = await fetch('/api/models', { cache: 'no-store' });
+    const data = await res.json();
+    freeModels = data.models || [];
+    renderModelSelect();
+  } catch (_) {
+    freeModels = [];
+    renderModelSelect();
+  }
+}
+
+if (modelSelect) {
+  modelSelect.addEventListener('change', () => {
+    selectedModel = modelSelect.value;
+  });
+}
+
+loadFreeModels();
 
 function setHistoryPanel(open) {
   if (!historySidebar) return;
@@ -576,10 +699,26 @@ async function sendMessage(e) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({question: q, history: history.slice(-6)})
+      body: JSON.stringify({
+        question: q,
+        history: history.slice(-6),
+        model: selectedModel || modelSelect.value,
+        disabled_models: [...getDisabledModels()]
+      })
     });
     const data = await res.json();
     removeTyping();
+
+    if (data.failed_models && data.failed_models.length) {
+      disableModels(data.failed_models);
+    }
+    if (data.alerts && data.alerts.length) {
+      alert(data.alerts.join('\n'));
+    }
+    if (data.model_used) {
+      selectedModel = data.model_used;
+      if (modelSelect) modelSelect.value = data.model_used;
+    }
 
     if (data.error) {
       addMsg('bot', escHtml(data.error));

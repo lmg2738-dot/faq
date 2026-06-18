@@ -35,11 +35,14 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-KANANA_TIMEOUT = int(os.environ.get("KANANA_TIMEOUT", "55") or "55")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_TIMEOUT = int(os.environ.get("OPENROUTER_TIMEOUT", "55") or "55")
+OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://github.com/lmg2738-dot/faq")
+OPENROUTER_APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "FAQ Chatbot")
 
 RETRIEVAL_TOP_K = 5
 RETRIEVAL_MIN_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "5.5"))
-FAQ_POLICY_VERSION = "3"
+FAQ_POLICY_VERSION = "4"
 
 _OFF_TOPIC_HINTS = (
     "지구",
@@ -209,19 +212,107 @@ def _env_clean(name: str) -> str:
     return raw
 
 
-def _kanana_api_key() -> str:
-    return _env_clean("KANANA_API_KEY")
+def _openrouter_api_key() -> str:
+    return _env_clean("OPENROUTER_API_KEY")
 
 
-def _kanana_base_url() -> str:
-    url = _env_clean("KANANA_BASE_URL") or (
-        "https://kanana-o.a2s-endpoint.kr-central-2.kakaocloud.com/v1"
+_models_cache: dict = {"ts": 0.0, "models": []}
+_MODELS_CACHE_TTL = 300
+
+_MODEL_FAIL_PATTERNS = (
+    "quota",
+    "rate limit",
+    "limit exceeded",
+    "exhausted",
+    "credit",
+    "capacity",
+    "overloaded",
+    "temporarily unavailable",
+    "not available",
+    "no longer available",
+    "model not found",
+    "disabled",
+)
+
+
+def _is_free_openrouter_model(model: dict) -> bool:
+    pricing = model.get("pricing") or {}
+    try:
+        prompt = float(pricing.get("prompt", "1") or "1")
+        completion = float(pricing.get("completion", "1") or "1")
+        return prompt == 0.0 and completion == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _fetch_openrouter_models_raw() -> list[dict]:
+    api_key = _openrouter_api_key()
+    if not api_key:
+        return []
+    req = urllib.request.Request(
+        f"{OPENROUTER_BASE_URL}/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
     )
-    return url.rstrip("/")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[!] OpenRouter models 조회 오류: {e}")
+        return []
+    items = []
+    for m in data.get("data") or []:
+        if not _is_free_openrouter_model(m):
+            continue
+        mid = m.get("id")
+        if not mid:
+            continue
+        items.append(
+            {
+                "id": mid,
+                "name": m.get("name") or mid,
+                "context_length": m.get("context_length"),
+            }
+        )
+    items.sort(key=lambda x: x["name"].lower())
+    return items
 
 
-def _kanana_model() -> str:
-    return _env_clean("KANANA_MODEL") or "kanana-o"
+def _get_free_openrouter_models(force_refresh: bool = False) -> list[dict]:
+    now = time.time()
+    if (
+        not force_refresh
+        and _models_cache["models"]
+        and now - _models_cache["ts"] < _MODELS_CACHE_TTL
+    ):
+        return _models_cache["models"]
+    models = _fetch_openrouter_models_raw()
+    _models_cache["ts"] = now
+    _models_cache["models"] = models
+    return models
+
+
+def _is_per_model_failure(code: int | None, err_msg: str) -> bool:
+    if code in (402, 404, 408, 429, 503):
+        return True
+    msg = (err_msg or "").lower()
+    return any(p in msg for p in _MODEL_FAIL_PATTERNS)
+
+
+def _build_model_try_order(
+    preferred_model: str,
+    disabled_models: list[str],
+    free_models: list[dict],
+) -> list[str]:
+    disabled = set(disabled_models or [])
+    free_ids = [m["id"] for m in free_models]
+    order: list[str] = []
+    if preferred_model and preferred_model in free_ids and preferred_model not in disabled:
+        order.append(preferred_model)
+    for mid in free_ids:
+        if mid not in disabled and mid not in order:
+            order.append(mid)
+    return order
 
 
 def _ensure_index() -> None:
@@ -532,16 +623,7 @@ _PROMPT_TEMPLATE = """\
 답변:"""
 
 
-def _call_kanana(question: str, context: list[str], history: list[dict]) -> tuple[str, str | None]:
-    """반환: (답변 텍스트, 오류 종류 — auth|config|quota|server|api|network|None)"""
-    api_key = _kanana_api_key()
-    if not api_key:
-        return (
-            "⚠️ KANANA_API_KEY가 설정되지 않았습니다.\n"
-            "Vercel → Settings → Environment Variables에 키를 등록한 뒤 Redeploy 해 주세요.",
-            "config",
-        )
-
+def _build_llm_messages(question: str, context: list[str], history: list[dict]) -> list[dict]:
     docs = context[:3] + ["(FAQ 발췌 없음)"] * (3 - len(context))
     prompt = _PROMPT_TEMPLATE.format(
         doc1=docs[0],
@@ -554,24 +636,31 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> tupl
     for m in history[-4:]:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": prompt})
+    return messages
 
-    body = json.dumps(
-        {"model": _kanana_model(), "messages": messages}, ensure_ascii=False
-    ).encode("utf-8")
+
+def _openrouter_request(
+    model_id: str, messages: list[dict]
+) -> tuple[str | None, int | None, str]:
+    api_key = _openrouter_api_key()
+    body = json.dumps({"model": model_id, "messages": messages}, ensure_ascii=False).encode(
+        "utf-8"
+    )
     req = urllib.request.Request(
-        f"{_kanana_base_url()}/chat/completions",
+        f"{OPENROUTER_BASE_URL}/chat/completions",
         data=body,
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": OPENROUTER_SITE_URL,
+            "X-Title": OPENROUTER_APP_TITLE,
         },
         method="POST",
     )
-
     try:
-        with urllib.request.urlopen(req, timeout=KANANA_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=OPENROUTER_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"], None
+            return data["choices"][0]["message"]["content"], None, ""
     except urllib.error.HTTPError as e:
         code = e.code
         try:
@@ -582,29 +671,87 @@ def _call_kanana(question: str, context: list[str], history: list[dict]) -> tupl
         if isinstance(err_body, dict):
             err_msg = err_body.get("message") or str(err_body)
         else:
-            err_msg = err_body or e.reason
-        if code == 429:
+            err_msg = err_body or e.reason or str(e)
+        return None, code, str(err_msg)
+    except Exception as e:
+        return None, None, str(e)
+
+
+def _call_openrouter_with_failover(
+    question: str,
+    context: list[str],
+    history: list[dict],
+    preferred_model: str,
+    disabled_models: list[str],
+) -> tuple[str, str | None, str | None, list[str], list[str]]:
+    """(답변, err_kind, model_used, failed_models, alerts)"""
+    api_key = _openrouter_api_key()
+    if not api_key:
+        return (
+            "⚠️ OPENROUTER_API_KEY가 설정되지 않았습니다.\n"
+            "Vercel → Environment Variables에 키를 등록한 뒤 Redeploy 해 주세요.",
+            "config",
+            None,
+            [],
+            [],
+        )
+
+    free_models = _get_free_openrouter_models()
+    if not free_models:
+        return (
+            "⚠️ OpenRouter 무료(0원) 모델 목록을 불러올 수 없습니다. API 키를 확인해 주세요.",
+            "config",
+            None,
+            [],
+            [],
+        )
+
+    try_order = _build_model_try_order(preferred_model, disabled_models, free_models)
+    if not try_order:
+        return (
+            "⚠️ 선택 가능한 무료 모델이 없습니다. 비활성화된 모델을 확인해 주세요.",
+            "config",
+            None,
+            [],
+            [],
+        )
+
+    messages = _build_llm_messages(question, context, history)
+    failed_models: list[str] = []
+    alerts: list[str] = []
+
+    for model_id in try_order:
+        content, code, err_msg = _openrouter_request(model_id, messages)
+        if content is not None:
+            return content, None, model_id, failed_models, alerts
+
+        if code == 401:
             return (
-                "⚠️ 일일 API 쿼터(10회)를 모두 소진하였습니다. 내일 00시에 초기화됩니다.",
-                "quota",
-            )
-        if code in (401, 403):
-            return (
-                "⚠️ API 키가 유효하지 않습니다.\n"
-                "1) Vercel Environment Variables의 KANANA_API_KEY에 신규 키만 입력(따옴표 없음)\n"
-                "2) Production·Preview 모두 적용 여부 확인\n"
-                "3) 저장 후 Redeploy\n"
+                "⚠️ OpenRouter API 키가 유효하지 않습니다. Vercel Environment Variables를 확인해 주세요.\n"
                 f"(서버 응답: {err_msg})",
                 "auth",
+                None,
+                failed_models,
+                alerts,
             )
-        if code == 500:
-            return (
-                "⚠️ GPU 서버 요청 폭주로 처리가 지연되고 있습니다. 잠시 후 다시 시도해 주세요.",
-                "server",
+
+        if _is_per_model_failure(code, err_msg):
+            failed_models.append(model_id)
+            label = next((m["name"] for m in free_models if m["id"] == model_id), model_id)
+            alerts.append(
+                f"모델 '{label}' 사용 한도/만료로 사용할 수 없습니다. 다음 무료 모델로 전환합니다."
             )
-        return f"⚠️ API 오류 ({code}): {err_msg}", "api"
-    except Exception as e:
-        return f"⚠️ API 호출 중 오류 발생: {e}", "network"
+            continue
+
+        return f"⚠️ OpenRouter API 오류 ({code}): {err_msg}", "api", None, failed_models, alerts
+
+    return (
+        "⚠️ 사용 가능한 무료 OpenRouter 모델이 없습니다. 잠시 후 다시 시도하거나 키를 확인해 주세요.",
+        "all_models_failed",
+        None,
+        failed_models,
+        alerts,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -754,6 +901,10 @@ def chat():
     data = request.get_json()
     question = (data.get("question") or "").strip()
     history = data.get("history", [])
+    preferred_model = (data.get("model") or "").strip()
+    disabled_models = data.get("disabled_models") or []
+    if not isinstance(disabled_models, list):
+        disabled_models = []
 
     if not question:
         return jsonify({"error": "질문을 입력해 주세요."}), 400
@@ -777,19 +928,42 @@ def chat():
             }
         )
 
-    answer, err_kind = _call_kanana(question, context_docs, history)
+    answer, err_kind, model_used, failed_models, alerts = _call_openrouter_with_failover(
+        question, context_docs, history, preferred_model, disabled_models
+    )
 
     if err_kind is None:
         answer = _finalize_faq_answer(question, answer, context_docs, results)
 
-    if err_kind in ("quota", "server", "api", "network") and context_docs:
+    if err_kind in ("all_models_failed", "api", "network") and context_docs:
         fallback = "🔍 API를 사용할 수 없어 FAQ 검색 결과를 직접 보여드립니다.\n\n"
         for i, doc in enumerate(context_docs[:3], 1):
             fallback += f"━━ 검색 결과 {i} ━━\n{doc}\n\n"
         answer = answer + "\n\n" + fallback
 
     _save_chat_history(question, answer)
-    return jsonify({"answer": answer, "references": refs})
+    return jsonify(
+        {
+            "answer": answer,
+            "references": refs,
+            "model_used": model_used,
+            "failed_models": failed_models,
+            "alerts": alerts,
+            "policy_version": FAQ_POLICY_VERSION,
+        }
+    )
+
+
+@app.route("/api/models", methods=["GET"])
+def list_models():
+    models = _get_free_openrouter_models()
+    return jsonify(
+        {
+            "models": models,
+            "enabled": bool(_openrouter_api_key()),
+            "count": len(models),
+        }
+    )
 
 
 @app.route("/api/history", methods=["GET"])
@@ -808,13 +982,13 @@ def chat_history():
 @app.route("/api/status", methods=["GET"])
 def api_status():
     """키 값은 노출하지 않고, 배포 환경 설정 여부만 확인합니다."""
-    key = _kanana_api_key()
+    key = _openrouter_api_key()
+    models = _get_free_openrouter_models()
     return jsonify(
         {
-            "kanana_key_set": bool(key),
-            "kanana_key_length": len(key),
-            "kanana_base_url": _kanana_base_url(),
-            "kanana_model": _kanana_model(),
+            "openrouter_key_set": bool(key),
+            "openrouter_key_length": len(key),
+            "free_model_count": len(models),
             "redis_enabled": _redis_configured(),
             "redis_url_set": bool(_redis_url()),
             "redis_token_length": len(_redis_token()),

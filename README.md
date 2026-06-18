@@ -1,6 +1,6 @@
 # FAQ 챗봇
 
-고객대응 FAQ 문서 기반 RAG 챗봇 (Flask + BM25 + Kanana-o).
+고객대응 FAQ 문서 기반 RAG 챗봇 (Flask + BM25 + OpenRouter 무료 모델).
 
 ## Vercel 배포
 
@@ -9,22 +9,22 @@
 
 | 변수 | 필수 | 설명 |
 |------|------|------|
-| `KANANA_API_KEY` | 예 | Kanana API 토큰 (**Vercel에만 등록, Git/로컬 커밋 금지**) |
-| `KANANA_BASE_URL` | 아니오 | 기본값: `https://kanana-o.a2s-endpoint.kr-central-2.kakaocloud.com/v1` |
-| `KANANA_MODEL` | 아니오 | 기본값: `kanana-o` |
-| `KANANA_TIMEOUT` | 아니오 | API 타임아웃(초). 기본 `55` (Vercel 함수 제한에 맞춤) |
+| `OPENROUTER_API_KEY` | 예 | OpenRouter API 키 (**Vercel에만 등록, Git/로컬 커밋 금지**) |
+| `OPENROUTER_TIMEOUT` | 아니오 | API 타임아웃(초). 기본 `55` |
+| `OPENROUTER_SITE_URL` | 아니오 | OpenRouter Referer (배포 URL 권장) |
+| `OPENROUTER_APP_TITLE` | 아니오 | OpenRouter 앱 이름. 기본 `FAQ Chatbot` |
 | `UPSTASH_REDIS_REST_URL` | 아니오 | Upstash Redis REST URL (질문·답변 최근 10건 저장) |
 | `UPSTASH_REDIS_REST_TOKEN` | 아니오 | Upstash Redis REST Token |
 
 3. Deploy 후 배포 URL에서 챗봇을 사용합니다.
 
-> **참고:** Kanana 응답이 길면 Vercel **Pro** 플랜에서 `maxDuration` 60초 설정이 필요할 수 있습니다. Hobby 플랜은 함수 실행 시간이 10초로 제한됩니다.
+> UI에서 **OpenRouter 무료($0) 모델**만 선택할 수 있습니다. 모델 한도/만료 시 다음 무료 모델로 자동 전환되며, 사용 불가 모델은 목록에서 선택할 수 없습니다.
 
 ## 로컬 실행
 
 ```powershell
 copy .env.example .env
-# .env 에 KANANA_API_KEY 입력
+# .env 에 OPENROUTER_API_KEY 입력
 python -m pip install -r requirements.txt
 python app.py
 ```
@@ -34,6 +34,6 @@ python app.py
 ## Windows 자동 실행 (로컬 PC)
 
 ```powershell
-.\build.ps1          # 의존성 + 시작 프로그램 등록
-.\uninstall_startup.ps1  # 자동 실행 해제
+.\build.ps1
+.\uninstall_startup.ps1
 ```
