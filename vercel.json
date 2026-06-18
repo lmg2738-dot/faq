@@ -1,20 +1,15 @@
 {
-  "version": 2,
-  "builds": [
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
     {
-      "src": "api/index.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "api/index.py"
+      "source": "/(.*)",
+      "destination": "/api/index"
     }
   ],
   "functions": {
     "api/index.py": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "excludeFiles": "{.env,.env.*,__pycache__/**,.venv/**,venv/**,*.ps1,*.bat,install_startup.ps1,uninstall_startup.ps1,build.ps1}"
     }
   }
 }
