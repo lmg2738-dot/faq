@@ -1,15 +1,19 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
+  "version": 2,
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index"
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "50mb"
+      }
     }
   ],
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 10,
-      "excludeFiles": "{.env,.env.*,__pycache__/**,.venv/**,venv/**,*.ps1,*.bat,build.ps1,install_startup.ps1,uninstall_startup.ps1,start_chatbot.bat}"
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
     }
-  }
+  ]
 }
